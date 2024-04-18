@@ -206,7 +206,7 @@ class pyApproximationSpace(BaseUI):
         self.refine_iter += 1
         return
 
-    def writeField(self, field, field_name, reset=True):
+    def writeField(self, field, field_name, reset=True, number=None):
         """
         Sets the problem variables with the supplied field and writes out the
         solution data file. Uses the field name to name the file.
@@ -226,7 +226,7 @@ class pyApproximationSpace(BaseUI):
         """
         # set the field in the problem variables
         self.problem.setVariables(field)
-        self.problem.writeSolution(baseName=f"{self.prob_name}_{field_name}")
+        self.problem.writeSolution(baseName=f"{self.prob_name}_{field_name}", number=number)
 
         if reset:
             # re-write the states back into the problem
@@ -472,10 +472,10 @@ class pyTACSAdapt(BaseUI):
 
         # write out the state field
         if writeSolution:
-            model.writeField(model.state, "state")
+            model.writeField(model.state, "primal")
         return
 
-    def solveAdjoint(self, model_type, writeSolution=False):
+    def solveAdjoint(self, model_type, compute_partials=True, source_terms=None, writeSolution=False):
         """
         Solves the adjoint problem for the given model and copies the adjoint to
         the model. Optionally write out the solution data file.
@@ -492,12 +492,17 @@ class pyTACSAdapt(BaseUI):
         model = self._selectModel(model_type)
 
         # get the output sensitivity w.r.t. the states
-        dJdu = model.assembler.createVec().getArray()
-        model.problem.addSVSens([model.output_name], [dJdu])
+        rhs = model.assembler.createVec().getArray()
+        if compute_partials:
+            model.problem.addSVSens([model.output_name], [rhs])
+
+        # add additional source terms if present
+        if source_terms is not None:
+            rhs += source_terms
 
         # solve for the adjoint variables
         model.adjoint.zeroEntries()
-        model.problem.solveAdjoint(dJdu, model.adjoint)
+        model.problem.solveAdjoint(rhs, model.adjoint)
 
         # write out the adjoint field
         if writeSolution:
