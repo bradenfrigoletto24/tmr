@@ -66,7 +66,6 @@ class pyApproximationSpace(BaseUI):
         self.adjoint = None
         self.refine_iter = 0
         self.prob_name = ""
-        self.output_name = ""
         return
 
     def createAssembler(self):
@@ -101,10 +100,12 @@ class pyApproximationSpace(BaseUI):
         )
 
         # check the output of interest is present in the problem
-        output_names = self.problem.getFunctionKeys()
-        assert (
-            self.output_name in output_names
-        ), f"Selected output of interest ({self.output_name}) is not in the list of outputs defined in the problem: {output_names}"
+        adapt_output = kwargs.get("adapt_output")
+        if adapt_output:
+            output_names = self.problem.getFunctionKeys()
+            assert (
+                adapt_output in output_names
+            ), f"Selected output of interest ({adapt_output}) is not in the list of outputs defined in the problem: {output_names}"
         return
 
     def setAuxElements(self, geom_labels, aux_type, **kwargs):
@@ -250,8 +251,7 @@ class pyTACSAdapt(BaseUI):
         _initCallBack,
         _elemCallBack,
         _probCallBack,
-        _adapt_output,
-        adapt_params={},
+        _adapt_params={},
     ):
         """
         Constructor
@@ -280,10 +280,7 @@ class pyTACSAdapt(BaseUI):
             to be used in analysis. See pyApproximationSpace.__init__() for more
             details on the function prototype.
 
-        _adapt_output : str
-            Name of the output to be used for the adaptive analysis
-
-        adapt_params : dict
+        _adapt_params : dict
             arg=value pairs that can be used to specify adaptation parameters
         """
         # Set MPI communicator
@@ -293,37 +290,36 @@ class pyTACSAdapt(BaseUI):
         self.initCallBack = _initCallBack
         self.coarse = pyApproximationSpace(comm, _elemCallBack, _probCallBack)
         self.fine = pyApproximationSpace(comm, _elemCallBack, _probCallBack)
-        self.adapt_output = _adapt_output
 
-        # set the adaptation parameters
-        valid_strategies = ("decreasing_threshold", "fixed_growth")
-        self.adapt_strategy = adapt_params.get("adapt_strategy", "").lower()
-        if self.adapt_strategy:
-            assert (
-                self.adapt_strategy in valid_strategies
-            ), f"adaptation strategy must be one of {valid_strategies}"
-            # get the general adaptation params
-            self.num_min_ref_levels = adapt_params.get("num_min_ref_levels", 0)
-            self.num_max_ref_levels = adapt_params.get(
-                "num_max_ref_levels", TMR.MAX_LEVEL
-            )
-            self.error_tol = adapt_params.get("error_tol")
-            assert (
-                self.error_tol is not None
-            ), f"error tolerance must be specified for adaptation"
-            # get strategy-specific params
-            if self.adapt_strategy == "decreasing_threshold":
-                self.num_decrease_iters = adapt_params.get("num_decrease_iters")
-                assert (
-                    self.num_decrease_iters is not None
-                ), f"number of decrease iterations must be specified for adaptation strategy `{self.adapt_strategy}`"
-            if self.adapt_strategy == "fixed_growth":
-                self.growth_refine_factor = np.clip(
-                    adapt_params.get("growth_refine_factor", 0.0), 0.0, 1.0
-                )
-                self.growth_coarsen_factor = np.clip(
-                    adapt_params.get("growth_coarsen_factor", 0.0), 0.0, 1.0
-                )
+        # set and check the adaptation parameters
+        self.adapt_params = _adapt_params
+        if self.adapt_params:
+            # check for an output of interest
+            output = self.adapt_params.get("output")
+            assert output is not None, "output of interest must be specified for adaptation"
+
+            # check the tolerance
+            tolerance = self.adapt_params.get("tolerance", -1.)
+            assert tolerance > 0., "positive tolerance must be set for adaptation"
+
+            # check the refinement levels
+            min_levels = self.adapt_params.get("min_num_refine_levels", 0)
+            max_levels = self.adapt_params.get("max_num_refine_levels", TMR.MAX_LEVEL)
+            assert 0 <= min_levels < max_levels <= TMR.MAX_LEVEL, \
+                f"refinement levels: 0 <= min_levels < max_levels <= {TMR.MAX_LEVEL}"
+            
+            # check the strategy and strategy-specific parameters
+            strategy = self.adapt_params.get("strategy", "").lower()
+            valid_strategies = ("decreasing_threshold", "fixed_growth")
+            assert strategy in valid_strategies, f"adaptation strategy must be one of {valid_strategies}"
+            if strategy == "decreasing_threshold":
+                num_decrease_iters = self.adapt_params.get("num_decrease_iters", -1)
+                assert num_decrease_iters > 0, "positive integer required for number of threshold decrements"
+            elif strategy == "fixed_growth":
+                refine_factor = self.adapt_params.get("growth_refine_factor", -1.)
+                assert 0. <= refine_factor <= 1.0, "growth refinement factor must be in range [0., 1.]"
+                coarsen_factor = self.adapt_params.get("growth_coarsen_factor", -1.)
+                assert 0. <= coarsen_factor <= 1.0, "growth coarsening factor must be in range [0., 1.]"
 
         # initialize the storage for saving model info
         self.mesh_history = {}  # mesh size (ndof)
@@ -334,8 +330,6 @@ class pyTACSAdapt(BaseUI):
             "element_errors": {},
         }  # element-wise errors
 
-        # set the output used for adaptation
-        self.setOutputOfInterest(self.adapt_output)
         return
 
     def initializeCoarseSpace(self, **kwargs):
@@ -393,20 +387,6 @@ class pyTACSAdapt(BaseUI):
         self.setupModel(model_type="fine", **kwargs)
         return
 
-    def setOutputOfInterest(self, output_name):
-        """
-        Sets the output name used for adaptation in both the coarse-space and
-        fine-space objects.
-
-        Parameters
-        ----------
-        output_name : str
-            Name of output to be used for output-based adaptation
-        """
-        setattr(self.coarse, "output_name", output_name)
-        setattr(self.fine, "output_name", output_name)
-        return
-
     def setupModel(self, model_type, **kwargs):
         """
         Sets up the model for the selected approximation space. After this
@@ -432,6 +412,8 @@ class pyTACSAdapt(BaseUI):
             kwargs["prob_name"] = f"{model_type}_{model.refine_iter}"
         else:
             kwargs["prob_name"] += f"_{model_type}_{model.refine_iter}"
+        if self.adapt_params.get("output"):
+            kwargs["adapt_output"] = self.adapt_params.get("output")
         model.createProblem(**kwargs)
 
         # record the number of degrees of freedom for this model
@@ -468,7 +450,9 @@ class pyTACSAdapt(BaseUI):
         model.problem.getVariables(model.state)
 
         # evaluate the output
-        model.problem.evalFunctions(self.output_history, evalFuncs=[model.output_name])
+        adapt_output = self.adapt_params.get("output")
+        if adapt_output:
+            model.problem.evalFunctions(self.output_history, evalFuncs=[adapt_output])
 
         # write out the state field
         if writeSolution:
@@ -492,9 +476,10 @@ class pyTACSAdapt(BaseUI):
         model = self._selectModel(model_type)
 
         # get the output sensitivity w.r.t. the states
+        adapt_output = self.adapt_params.get("output")
         rhs = model.assembler.createVec().getArray()
-        if compute_partials:
-            model.problem.addSVSens([model.output_name], [rhs])
+        if compute_partials and adapt_output:
+            model.problem.addSVSens([adapt_output], [rhs])
 
         # add additional source terms if present
         if source_terms is not None:
@@ -576,9 +561,11 @@ class pyTACSAdapt(BaseUI):
         # evaluate the fine-space output if the state is interpolated
         if field_type == "state":
             self.fine.problem.setVariables(getattr(self.fine, field_type))
-            self.fine.problem.evalFunctions(
-                self.output_history, evalFuncs=[self.fine.output_name]
-            )
+            adapt_output = self.adapt_params.get("output")
+            if adapt_output:
+                self.fine.problem.evalFunctions(
+                    self.output_history, evalFuncs=[adapt_output]
+                )
 
         # write out the selected field
         if writeSolution:
@@ -727,9 +714,10 @@ class pyTACSAdapt(BaseUI):
         element_errors : np.ndarray (1D, float) [num_elements]
             The error in the output associated with each element in the mesh
         """
-        if self.adapt_strategy == "decreasing_threshold":
+        strategy = self.adapt_params.get("strategy", "").lower()
+        if strategy == "decreasing_threshold":
             self.adaptModelDecreasingThreshold(element_errors)
-        elif self.adapt_strategy == "fixed_growth":
+        elif strategy == "fixed_growth":
             self.adaptModelFixedGrowth(element_errors)
         else:
             # apply uniform refinement to the coarse model
@@ -750,16 +738,22 @@ class pyTACSAdapt(BaseUI):
         element_errors : np.ndarray (1D, float) [num_elements]
             The error in the output associated with each element in the mesh
         """
+        # get the adaptation parameters
+        tolerance = self.adapt_params.get("tolerance")
+        min_levels = self.adapt_params.get("min_num_refine_levels", 0)
+        max_levels = self.adapt_params.get("max_num_refine_levels", TMR.MAX_LEVEL)
+        num_decrease_iters = self.adapt_params.get("num_decrease_iters")
+
         # get the total number of elements
         nelems = len(element_errors)
         elem_counts = self.comm.allgather(nelems)
         nelems_tot = sum(elem_counts)
 
         # choose elements based on an equidistributed target error
-        target_error = self.error_tol / nelems_tot
+        target_error = tolerance / nelems_tot
         error_ratio = element_errors / target_error
         refine_threshold = max(
-            1.0, 2.0 ** (self.num_decrease_iters - self.coarse.refine_iter)
+            1.0, 2.0 ** (num_decrease_iters - self.coarse.refine_iter)
         )
 
         # record the refinement threshold:error_ratio pair for this iteration
@@ -780,8 +774,8 @@ class pyTACSAdapt(BaseUI):
         # adapt the coarse-space model
         self.coarse.applyRefinement(
             adapt_indicator.astype(np.intc),
-            num_min_levels=self.num_min_ref_levels,
-            num_max_levels=self.num_max_ref_levels,
+            num_min_levels=min_levels,
+            num_max_levels=max_levels,
         )
         return
 
@@ -795,19 +789,26 @@ class pyTACSAdapt(BaseUI):
         element_errors : np.ndarray (1D, float) [num_elements]
             The error in the output associated with each element in the mesh
         """
+        # get the adaptation parameters
+        tolerance = self.adapt_params.get("tolerance")
+        min_levels = self.adapt_params.get("min_num_refine_levels", 0)
+        max_levels = self.adapt_params.get("max_num_refine_levels", TMR.MAX_LEVEL)
+        refine_factor = self.adapt_params.get("growth_refine_factor")
+        coarsen_factor = self.adapt_params.get("growth_coarsen_factor")
+        
         # get the elem counts
         nelems = len(element_errors)
         elem_counts = self.comm.allgather(nelems)
         nelems_tot = sum(elem_counts)
-        nrefine = int(self.growth_refine_factor * nelems_tot)
-        ncoarse = int(self.growth_coarsen_factor * nelems_tot)
+        nrefine = int(refine_factor * nelems_tot)
+        ncoarse = int(coarsen_factor * nelems_tot)
 
         # gather all the element errors on each proc
         element_errors_tot = np.empty(nelems_tot)
         self.comm.Allgatherv(element_errors, [element_errors_tot, elem_counts])
 
         # compute the error ratio for all elements
-        target_error = self.error_tol / nelems_tot
+        target_error = tolerance / nelems_tot
         error_ratio_tot = element_errors_tot / target_error
 
         # sort all the element error ratios in descending order
@@ -827,6 +828,10 @@ class pyTACSAdapt(BaseUI):
             adapt_indicator_tot[coarse_inds] = np.where(
                 error_ratio_tot[coarse_inds] < 1.0, -1, adapt_indicator_tot[coarse_inds]
             )
+        if nrefine > 0:
+            self.printroot(f"targeting {nrefine} elements for refinement with combined error = {np.sum(element_errors_tot[refine_inds]):.6e}")
+        if ncoarse > 0:
+            self.printroot(f"targeting {ncoarse} elements for coarsening with combined error = {np.sum(element_errors_tot[coarse_inds]):.6e}")
 
         # update the adaptation history
         if refine_inds is not None:
@@ -858,8 +863,8 @@ class pyTACSAdapt(BaseUI):
         # adapt the coarse-space model
         self.coarse.applyRefinement(
             adapt_indicator.astype(np.intc),
-            num_min_levels=self.num_min_ref_levels,
-            num_max_levels=self.num_max_ref_levels,
+            num_min_levels=min_levels,
+            num_max_levels=max_levels,
         )
         return
 
@@ -872,6 +877,16 @@ class pyTACSAdapt(BaseUI):
         filename : str
             name of output file, should include the proper .hdf5 file extension
         """
+        # get adapt parameters
+        output = self.adapt_params.get("output")
+        tolerance = self.adapt_params.get("tolerance")
+        min_levels = self.adapt_params.get("min_num_refine_levels", 0)
+        max_levels = self.adapt_params.get("max_num_refine_levels", TMR.MAX_LEVEL)
+        strategy = self.adapt_params.get("strategy", "").lower()
+        num_decrease_iters = self.adapt_params.get("num_decrease_iters")
+        refine_factor = self.adapt_params.get("growth_refine_factor")
+        coarsen_factor = self.adapt_params.get("growth_coarsen_factor")
+
         if self.comm.rank == 0:
             if not filename:
                 filename = "model_history.hdf5"
@@ -907,7 +922,7 @@ class pyTACSAdapt(BaseUI):
                         if "fine" in key
                     ]
                 )
-                h5["output_history"].attrs["output_name"] = self.adapt_output.replace(
+                h5["output_history"].attrs["output_name"] = output.replace(
                     "_", " "
                 ).upper()
 
@@ -946,29 +961,29 @@ class pyTACSAdapt(BaseUI):
                 )
                 for key, val in self.adaptation_history["element_errors"].items():
                     h5[f"adaptation_history/element_errors/{key}"] = val
-                if self.adapt_strategy:
+                if strategy:
                     h5["adaptation_history"].attrs[
                         "strategy"
-                    ] = self.adapt_strategy.replace("_", " ").lower()
-                    h5["adaptation_history"].attrs["error_tolerance"] = self.error_tol
+                    ] = strategy.replace("_", " ").lower()
+                    h5["adaptation_history"].attrs["error_tolerance"] = tolerance
                     h5["adaptation_history"].attrs[
                         "max_refine_levels"
-                    ] = self.num_max_ref_levels
+                    ] = max_levels
                     h5["adaptation_history"].attrs[
                         "min_refine_levels"
-                    ] = self.num_min_ref_levels
-                    if hasattr(self, "num_decrease_iters"):
+                    ] = min_levels
+                    if num_decrease_iters:
                         h5["adaptation_history"].attrs[
                             "threshold_decrease_iters"
-                        ] = self.num_decrease_iters
-                    if hasattr(self, "growth_refine_factor"):
+                        ] = num_decrease_iters
+                    if refine_factor:
                         h5["adaptation_history"].attrs[
                             "growth_refine_factor"
-                        ] = self.growth_refine_factor
-                    if hasattr(self, "growth_coarsen_factor"):
+                        ] = refine_factor
+                    if coarsen_factor:
                         h5["adaptation_history"].attrs[
                             "growth_coarsen_factor"
-                        ] = self.growth_coarsen_factor
+                        ] = coarsen_factor
         return
 
     def _selectModel(self, model_type):
