@@ -883,7 +883,7 @@ class pyGeometryLoader(BaseUI):
             )
         return compIDList
 
-    def getConnectivityForComp(self, componentIDs):
+    def getConnectivityForComps(self, componentIDs):
         """
         Returns element connectivities associated with the specified components
 
@@ -899,11 +899,11 @@ class pyGeometryLoader(BaseUI):
         conn : np.ndarray
             Element connectivity for the specified component IDs
         """
-        # get the global element ids associated with the components
-        elemIDs = self.getGlobalElementIDsForComps(componentIDs)
+        # get the local element ids associated with the components
+        elemIDs = self.getLocalElementIDsForComps(componentIDs)
 
-        # get the full global element connectivity
-        global_conn = self.getGlobalElementConnectivity()
+        # get the element connectivity using global node numbers
+        global_conn = self.forest.getMeshConn()
 
         # only retain the connectivity for associated elems
         conn = global_conn[elemIDs]
@@ -934,10 +934,12 @@ class pyGeometryLoader(BaseUI):
             # get the current component label
             comp_name = self.compIDtoLabel[compID]
 
-            # get the local node ids associated with this label
+            # get the local node ids associated with this label (these ids might actually be global...)
             nodeIDs.update(self.forest.getNodesWithName(comp_name))
 
-        return list(nodeIDs)
+        # convert the node ids to be truly local
+        nodeIDs = self.getLocalNodeIDsFromGlobal(list(nodeIDs))
+        return nodeIDs
 
     def getGlobalNodeIDsForComps(self, componentIDs):
         """
@@ -955,7 +957,7 @@ class pyGeometryLoader(BaseUI):
             Unique node IDs that belong to the given component IDs
         """
         # get the total element connectivity (global node ids) for the specified compIDs
-        conn = self.getConnectivityForComp(componentIDs)
+        conn = self.getConnectivityForComps(componentIDs)
 
         # flatten and uniquify the nodeIDs from the connectivity info
         nodeIDs = list(set(np.ravel(conn)))

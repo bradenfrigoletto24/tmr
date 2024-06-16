@@ -310,7 +310,7 @@ class pyTACSAdapt(BaseUI):
             
             # check the strategy and strategy-specific parameters
             strategy = self.adapt_params.get("strategy", "").lower()
-            valid_strategies = ("decreasing_threshold", "fixed_growth")
+            valid_strategies = ("decreasing_threshold", "fixed_growth", "uniform")
             assert strategy in valid_strategies, f"adaptation strategy must be one of {valid_strategies}"
             if strategy == "decreasing_threshold":
                 num_decrease_iters = self.adapt_params.get("num_decrease_iters", -1)
@@ -480,6 +480,7 @@ class pyTACSAdapt(BaseUI):
         rhs = model.assembler.createVec().getArray()
         if compute_partials and adapt_output:
             model.problem.addSVSens([adapt_output], [rhs])
+            rhs *= -1. # scale by -1 for consistent sign convention
 
         # add additional source terms if present
         if source_terms is not None:
